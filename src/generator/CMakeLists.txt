@@ -4,6 +4,7 @@ add_subdirectory (lissajous0r)
 add_subdirectory (nois0r)
 add_subdirectory (onecol0r)
 add_subdirectory (partik0l)
+add_subdirectory (screencap)
 if (NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   # clang 3.1 on OSX fails to compile this one
   add_subdirectory (test_pat)
