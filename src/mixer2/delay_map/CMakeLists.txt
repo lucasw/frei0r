@@ -11,6 +11,9 @@ endif (MSVC)
 add_library(${TARGET} MODULE ${SOURCES})
 # include_directories(${OpenCV_INCLUDE_DIRECTORIES})
 # target_link_libraries(${TARGET} ${OPENV_LIBRARIES})
-set_target_properties(${TARGET} PROPERTIES PREFIX "")
+set_target_properties(${TARGET} PROPERTIES
+  PREFIX ""
+  CXX_STANDARD 17
+)
 
 install(TARGETS ${TARGET} LIBRARY DESTINATION ${LIBDIR})

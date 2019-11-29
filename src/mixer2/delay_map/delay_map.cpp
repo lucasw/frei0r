@@ -19,6 +19,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <algorithm>
 #include <assert.h>
 #include <chrono>
 #include <deque>
@@ -28,78 +29,114 @@
 #include <stdlib.h>
 #include <vector>
 
+// #define LOG(msg) std::cout << __FUNCTION__ << ":" << __LINE__ << " " << msg << "\n"
+#define LOG(msg) do {} while(0)
 extern "C" {
 #include "frei0r.h"
 }
 
 typedef struct delay_map_instance {
-  size_t width_ = 8;
-  size_t height_ = 8;
+  const size_t width_ = 8;
+  const size_t height_ = 8;
+  const size_t num_chan_ = 4;
+  const size_t max_size_ = 180;
   // scale 0 - 255 values to indices into the queue_
   double scale_ = 1.0;
   double offset_ = 0.0;
   bool use_color_ = true;
   bool invert_ = false;
-  double queue_length_scale_ = 0.25;
-  // std::deque<cv::Mat> queue_;
-  std::deque<std::vector<unsigned char>> queue_;
+  // std::deque<std::vector<unsigned char>> queue_;
+  std::vector<unsigned char> queue_;
+  size_t queue_start_ = 0;
+
+  delay_map_instance(size_t width, size_t height) :
+    width_(width),
+    height_(height)
+  {
+    queue_.resize(width_ * height_ * num_chan_ * max_size_);
+    std::cout << __FUNCTION__ << __LINE__ << " delay map "
+        << width_ << " x " << height_ << " " << max_size_ << " " << num_chan_
+        << " " << queue_.size()
+        << " " << this << "\n";
+  }
 
   void update(unsigned char *in, unsigned char *map_raw,
               unsigned char *dst_raw) {
 #if 0
-    std::cout << width_ << " " << height_
+    LOG(width_ << " " << height_
         << " " << (void*)in
         << " " << (void*)map_raw
-        << " " << (void*)dst_raw << "\n";
+        << " " << (void*)dst_raw << std::endl);
 #endif
     if ((width_ == 0) || (height_ == 0)) {
+      return;
+    }
+    if ((in == nullptr) || (map_raw == nullptr) || (dst_raw == nullptr)) {
       return;
     }
     // TODO(lucasw) there is something wrong where if the plugin is started
     // with an active map it produces all black.
 
-    // cv::Size sz = cv::Size(width_, height_);
-    // cv::Mat image_in = cv::Mat(sz, CV_8UC4); // (void*)in);
-    std::vector<unsigned char> image_in;
-    queue_.push_back(image_in);
-    queue_.back().resize(width_ * height_ * 4);
-    // std::copy(in, in + width_ * height_ * 4, &image_in.data[0]);
-    std::copy(in, in + width_ * height_ * 4, &queue_.back()[0]);
-    size_t max_size = queue_length_scale_ * 480;
-    if (max_size < 1) {
-      max_size = 1;
-    }
-    while (queue_.size() > max_size) {
-      queue_.pop_front();
-    }
+    LOG(queue_start_ << " " << scale_ << " " << offset_ << " " << invert_);
+    const size_t im_sz = width_ * height_ * 4;
+    const size_t im_ind = queue_start_ * im_sz;
+    std::copy(in, in + im_sz, &queue_[im_ind]);
+
+    // TODO(lucasw) probably should round here and in the main loop, but what performance cost?
     if (false) {
-    // if (queue_.size() != max_size) {
-      std::cout << "queue size " << queue_.size() << " " << max_size
-        << queue_length_scale_ << "\n";
+    // if (scale_ <= 0.0) {
+      std::copy(in, in + im_sz, dst_raw);
+      return;
     }
+
+    const int invert_scale = (invert_ >= 0.5) ? 1 : -1;
+    LOG(max_size_ << " " << invert_scale);
 
     for (size_t y = 0; y < height_; ++y) {
       for (size_t x = 0; x < width_; ++x) {
+        const size_t pix_ind = y * width_ * num_chan_ + x * num_chan_;
         for (size_t i = 0; i < 4; ++i) {
-          const size_t ind = y * width_ * 4 + x * 4 + i;
-          // TODO(lucasw) try interpolation with a float queue_ind
-          int queue_ind = map_raw[ind];
-          // scale by queue size rather than max_size
-          queue_ind = queue_ind * (queue_.size() * (scale_ / 255.0 + offset_));
-          if (queue_ind < 0) {
-            queue_ind = 0;
-          } else if (queue_ind >= queue_.size()) {
-            queue_ind = queue_.size() - 1;
+          const size_t pix_chan_ind = pix_ind + i;
+          // TODO(lucasw) try interpolation with a float src_im_ind
+          // black means the most recent image, white the earliest
+          const int src_im_ind_raw = map_raw[pix_chan_ind];
+          const int src_im_ind_offset = invert_scale * (max_size_ *
+              (scale_ * src_im_ind_raw / 255.0 + offset_));
+          const int src_im_ind_pre = (static_cast<int>(queue_start_) + src_im_ind_offset);
+          int max_ssize = static_cast<int>(max_size_);
+          const int src_im_ind =  (max_ssize + src_im_ind_pre) % max_ssize;
+          const size_t combined_ind = src_im_ind * im_sz + pix_chan_ind;
+
+#if 0
+          if ((y == 0) && (x == 0) && (i == 0)) {
+            std::cout << queue_start_ << " " << combined_ind
+              << ", src_im_ind_pre " << src_im_ind_pre
+              << ", src_im_ind " << src_im_ind
+              << ", src_im_ind_offset " << src_im_ind_offset
+              << ", " << src_im_ind_raw << " " << scale_
+              << " " << offset_ << " " << invert_scale << "\n";
           }
-          // TODO(lucasw) need invert toggle, but for now black means the most
-          // recent image, white the earliest
-          if (!invert_) {
-            queue_ind = queue_.size() - 1 - queue_ind;
+#endif
+#if 1
+          // if (combined_ind >= queue_.size()) {
+          if (combined_ind >= queue_.size()) {
+            std::cerr << "x " << x << ", y " << y
+                << ", queue_start_ " << queue_start_
+                << ", src_im_ind_raw " << src_im_ind_raw
+                << ", src_im_ind " << src_im_ind
+                << ", im_sz " << im_sz
+                << ", pix_chan_ind " << pix_chan_ind
+                << ", combined_ind " << combined_ind
+                << ", queue size " << queue_.size() << "\n";
+            return;
           }
-          dst_raw[ind] = queue_[static_cast<size_t>(queue_ind)][ind];
+#endif
+          dst_raw[pix_chan_ind] = queue_[combined_ind];
         }
       }
     }
+    queue_start_++;
+    queue_start_ %= max_size_;
   }
 } delay_map_instance_t;
 
@@ -123,26 +160,21 @@ void f0r_get_plugin_info(f0r_plugin_info_t *inverterInfo) {
 void f0r_get_param_info(f0r_param_info_t *info, int param_index) {
   switch (param_index) {
   case 0:
-    info->name = "queue length";
-    info->type = F0R_PARAM_DOUBLE;
-    info->explanation = "queue length";
-    break;
-  case 1:
     info->name = "scale";
     info->type = F0R_PARAM_DOUBLE;
     info->explanation = "scale";
     break;
-  case 2:
+  case 1:
     info->name = "offset";
     info->type = F0R_PARAM_DOUBLE;
     info->explanation = "offset";
     break;
-  case 3:
+  case 2:
     info->name = "invert";
     info->type = F0R_PARAM_BOOL;
     info->explanation = "invert";
     break;
-  case 4:
+  case 3:
     info->name = "use color";
     info->type = F0R_PARAM_BOOL;
     info->explanation = "use color";
@@ -151,15 +183,14 @@ void f0r_get_param_info(f0r_param_info_t *info, int param_index) {
 }
 
 f0r_instance_t f0r_construct(unsigned int width, unsigned int height) {
-  delay_map_instance_t *inst = new delay_map_instance;
-  inst->width_ = width;
-  inst->height_ = height;
-  std::cout << "delay map " << width << " x " << height << "\n";
+  LOG("construct");
+  delay_map_instance_t *inst = new delay_map_instance(width, height);
   return (f0r_instance_t)inst;
 }
 
 void f0r_destruct(f0r_instance_t instance) {
   // TODO(lucasw) close the display?
+  LOG("destruct");
   delay_map_instance_t *inst =
       reinterpret_cast<delay_map_instance_t *>(instance);
   delete inst;
@@ -169,25 +200,21 @@ void f0r_set_param_value(f0r_instance_t instance, f0r_param_t param,
                          int param_index) {
   assert(instance);
   delay_map_instance_t *inst = (delay_map_instance_t *)instance;
+  LOG(inst << " " << param << " " << param_index);
 
   switch (param_index) {
   case 0: {
-    inst->queue_length_scale_ = *(double *)param;
+    inst->scale_ = *(double *)param;
+    std::clamp(inst->scale_, 0.0, 1.0);
     break;
   }
   case 1: {
-    inst->scale_ = *(double *)param;
+    inst->offset_ = *(double *)param;
+    std::clamp(inst->offset_, 0.0, 1.0);
     break;
   }
   case 2: {
-    inst->offset_ = *(double *)param;
-    break;
-  }
-  case 3: {
     inst->invert_ = *(bool *)param;
-    break;
-  }
-  case 4: {
     break;
   }
   }
@@ -197,18 +224,16 @@ void f0r_get_param_value(f0r_instance_t instance, f0r_param_t param,
                          int param_index) {
   assert(instance);
   delay_map_instance_t *inst = (delay_map_instance_t *)instance;
+  LOG(inst << " " << param << " " << param_index);
 
   switch (param_index) {
   case 0:
-    *(f0r_param_double *)param = inst->queue_length_scale_;
-    break;
-  case 1:
     *(f0r_param_double *)param = inst->scale_;
     break;
-  case 2:
+  case 1:
     *(f0r_param_double *)param = inst->offset_;
     break;
-  case 3:
+  case 2:
     *(f0r_param_bool *)param = inst->invert_;
     break;
   }
@@ -219,6 +244,7 @@ void f0r_update2(f0r_instance_t instance, double time, const uint32_t *inframe1,
                  uint32_t *outframe) {
   assert(instance);
   delay_map_instance_t *inst = (delay_map_instance_t *)instance;
+  LOG(inst << " " << inframe1 << " " << inframe2);
   unsigned char *src = (unsigned char *)inframe1;
   unsigned char *map = (unsigned char *)inframe2;
   unsigned char *dst = (unsigned char *)outframe;
@@ -229,5 +255,5 @@ void f0r_update2(f0r_instance_t instance, double time, const uint32_t *inframe1,
   inst->update(src, map, dst);
   auto t_end = std::chrono::high_resolution_clock::now();
   double elapsed_time_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-  std::cout << "update time: " << elapsed_time_ms << "\n";
+  LOG("update time ms: " << elapsed_time_ms);
 }
