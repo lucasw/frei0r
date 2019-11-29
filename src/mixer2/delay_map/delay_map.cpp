@@ -20,6 +20,7 @@
  */
 
 #include <assert.h>
+#include <chrono>
 #include <deque>
 #include <iostream>
 // #include <opencv2/core.hpp>
@@ -37,7 +38,7 @@ typedef struct delay_map_instance {
   // scale 0 - 255 values to indices into the queue_
   double scale_ = 1.0;
   double offset_ = 0.0;
-  bool use_color_;
+  bool use_color_ = true;
   bool invert_ = false;
   double queue_length_scale_ = 0.25;
   // std::deque<cv::Mat> queue_;
@@ -45,10 +46,13 @@ typedef struct delay_map_instance {
 
   void update(unsigned char *in, unsigned char *map_raw,
               unsigned char *dst_raw) {
-    if (width_ == 0) {
-      return;
-    }
-    if (height_ == 0) {
+#if 0
+    std::cout << width_ << " " << height_
+        << " " << (void*)in
+        << " " << (void*)map_raw
+        << " " << (void*)dst_raw << "\n";
+#endif
+    if ((width_ == 0) || (height_ == 0)) {
       return;
     }
     // TODO(lucasw) there is something wrong where if the plugin is started
@@ -74,39 +78,25 @@ typedef struct delay_map_instance {
         << queue_length_scale_ << "\n";
     }
 
-    // cv::Mat bgra_map = cv::Mat(sz, CV_8UC4, (void *)map_raw);
-    // cv::resize(bgra_map, bgra_map, sz, 0, 0, cv::INTER_NEAREST);
-    // cv::Mat map;
-    // cv::cvtColor(bgra_map, map, cv::COLOR_BGRA2GRAY);
-
-    // cv::Mat image_out = cv::Mat(sz, CV_8UC4, cv::Scalar::all(0));
     for (size_t y = 0; y < height_; ++y) {
       for (size_t x = 0; x < width_; ++x) {
-        const size_t ind = y * width_ * 4 + x * 4;
-        // TODO(lucasw) try this out as a float array operation rather
-        // than per-element.
-        // int queue_ind = map.at<uchar>(y, x);
-        // use only b channel?
-        int queue_ind = map_raw[ind];
-        // scale by queue size rather than max_size
-        queue_ind = queue_ind * (queue_.size() * (scale_ / 255.0 + offset_));
-        if (queue_ind < 0) {
-          queue_ind = 0;
-        } else if (queue_ind >= queue_.size()) {
-          queue_ind = queue_.size() - 1;
-        }
-        // TODO(lucasw) need invert toggle, but for now black means the most
-        // recent image, white the earliest
-        if (!invert_) {
-          queue_ind = queue_.size() - 1 - queue_ind;
-        }
-        // image_out.at<cv::Vec4b>(y, x) = queue_[queue_ind].at<cv::Vec4b>(y,
-        // x);
-        // const cv::Vec4b val =
-        //    queue_[static_cast<size_t>(queue_ind)].at<cv::Vec4b>(y, x);
         for (size_t i = 0; i < 4; ++i) {
-          // dst_raw[ind + i] = val[i];
-          dst_raw[ind + i] = queue_[static_cast<size_t>(queue_ind)][ind + i];
+          const size_t ind = y * width_ * 4 + x * 4 + i;
+          // TODO(lucasw) try interpolation with a float queue_ind
+          int queue_ind = map_raw[ind];
+          // scale by queue size rather than max_size
+          queue_ind = queue_ind * (queue_.size() * (scale_ / 255.0 + offset_));
+          if (queue_ind < 0) {
+            queue_ind = 0;
+          } else if (queue_ind >= queue_.size()) {
+            queue_ind = queue_.size() - 1;
+          }
+          // TODO(lucasw) need invert toggle, but for now black means the most
+          // recent image, white the earliest
+          if (!invert_) {
+            queue_ind = queue_.size() - 1 - queue_ind;
+          }
+          dst_raw[ind] = queue_[static_cast<size_t>(queue_ind)][ind];
         }
       }
     }
@@ -194,6 +184,7 @@ void f0r_set_param_value(f0r_instance_t instance, f0r_param_t param,
     break;
   }
   case 3: {
+    inst->invert_ = *(bool *)param;
     break;
   }
   case 4: {
@@ -218,7 +209,7 @@ void f0r_get_param_value(f0r_instance_t instance, f0r_param_t param,
     *(f0r_param_double *)param = inst->offset_;
     break;
   case 3:
-    *(f0r_param_bool *)param = false;
+    *(f0r_param_bool *)param = inst->invert_;
     break;
   }
 }
@@ -231,5 +222,12 @@ void f0r_update2(f0r_instance_t instance, double time, const uint32_t *inframe1,
   unsigned char *src = (unsigned char *)inframe1;
   unsigned char *map = (unsigned char *)inframe2;
   unsigned char *dst = (unsigned char *)outframe;
+
+  const clock_t begin_time = clock();
+  // this is taking 10-15ms with a 640x480 image
+  auto t_start = std::chrono::high_resolution_clock::now();
   inst->update(src, map, dst);
+  auto t_end = std::chrono::high_resolution_clock::now();
+  double elapsed_time_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  std::cout << "update time: " << elapsed_time_ms << "\n";
 }
