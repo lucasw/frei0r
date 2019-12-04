@@ -29,8 +29,8 @@
 #include <stdlib.h>
 #include <vector>
 
-// #define LOG(msg) std::cout << __FUNCTION__ << ":" << __LINE__ << " " << msg << "\n"
-#define LOG(msg) do {} while(0)
+#define LOG(msg) std::cout << __FUNCTION__ << ":" << __LINE__ << " " << msg << "\n"
+#define DEBUG(msg) do {} while(0)
 extern "C" {
 #include "frei0r.h"
 }
@@ -39,7 +39,7 @@ typedef struct delay_map_instance {
   const size_t width_ = 8;
   const size_t height_ = 8;
   const size_t num_chan_ = 4;
-  const size_t max_size_ = 180;
+  const size_t buffer_len_ = 180;
   // scale 0 - 255 values to indices into the queue_
   double scale_ = 1.0;
   double offset_ = 0.0;
@@ -53,9 +53,9 @@ typedef struct delay_map_instance {
     width_(width),
     height_(height)
   {
-    queue_.resize(width_ * height_ * num_chan_ * max_size_);
+    queue_.resize(width_ * height_ * num_chan_ * buffer_len_);
     std::cout << __FUNCTION__ << __LINE__ << " delay map "
-        << width_ << " x " << height_ << " " << max_size_ << " " << num_chan_
+        << width_ << " x " << height_ << " " << buffer_len_ << " " << num_chan_
         << " " << queue_.size()
         << " " << this << "\n";
   }
@@ -63,7 +63,7 @@ typedef struct delay_map_instance {
   void update(unsigned char *in, unsigned char *map_raw,
               unsigned char *dst_raw) {
 #if 0
-    LOG(width_ << " " << height_
+    DEBUG(width_ << " " << height_
         << " " << (void*)in
         << " " << (void*)map_raw
         << " " << (void*)dst_raw << std::endl);
@@ -77,10 +77,8 @@ typedef struct delay_map_instance {
     // TODO(lucasw) there is something wrong where if the plugin is started
     // with an active map it produces all black.
 
-    LOG(queue_start_ << " " << scale_ << " " << offset_ << " " << invert_);
-    const size_t im_sz = width_ * height_ * 4;
-    const size_t im_ind = queue_start_ * im_sz;
-    std::copy(in, in + im_sz, &queue_[im_ind]);
+    DEBUG(queue_start_ << " " << scale_ << " " << offset_ << " " << invert_);
+    const size_t im_sz = width_ * height_ * num_chan_;
 
     // TODO(lucasw) probably should round here and in the main loop, but what performance cost?
     if (false) {
@@ -89,23 +87,28 @@ typedef struct delay_map_instance {
       return;
     }
 
+    const int buffer_ssize = static_cast<int>(buffer_len_);
     const int invert_scale = (invert_ >= 0.5) ? 1 : -1;
-    LOG(max_size_ << " " << invert_scale);
+    DEBUG(buffer_len_ << " " << invert_scale);
 
     for (size_t y = 0; y < height_; ++y) {
       for (size_t x = 0; x < width_; ++x) {
-        const size_t pix_ind = y * width_ * num_chan_ + x * num_chan_;
+        const size_t pix_ind = y * width_ + x;
         for (size_t i = 0; i < 4; ++i) {
-          const size_t pix_chan_ind = pix_ind + i;
+          const size_t pix_chan_ind = pix_ind * num_chan_ + i;
+          const size_t dst_ind = buffer_len_ * pix_chan_ind + queue_start_;
+          // every pixel component color is buffer_size away from the next
+          // one, so each is adjacent a version of itself from earlier
+          // steps in time.
           // TODO(lucasw) try interpolation with a float src_im_ind
           // black means the most recent image, white the earliest
-          const int src_im_ind_raw = map_raw[pix_chan_ind];
-          const int src_im_ind_offset = invert_scale * (max_size_ *
-              (scale_ * src_im_ind_raw / 255.0 + offset_));
-          const int src_im_ind_pre = (static_cast<int>(queue_start_) + src_im_ind_offset);
-          int max_ssize = static_cast<int>(max_size_);
-          const int src_im_ind =  (max_ssize + src_im_ind_pre) % max_ssize;
-          const size_t combined_ind = src_im_ind * im_sz + pix_chan_ind;
+          const int delay_raw = map_raw[pix_chan_ind];
+          // convert from 0-255 to 0 - buffer_len_ with scale and offset
+          const int delay_offset = invert_scale * (buffer_len_ *
+              (scale_ * delay_raw / 255.0 + offset_));
+          const int delay_pre = (static_cast<int>(queue_start_) + delay_offset);
+          const int delay_ind =  (buffer_ssize + delay_pre) % buffer_ssize;
+          const size_t combined_ind = buffer_len_ * pix_chan_ind + delay_ind;
 
 #if 0
           if ((y == 0) && (x == 0) && (i == 0)) {
@@ -119,24 +122,24 @@ typedef struct delay_map_instance {
 #endif
 #if 1
           // if (combined_ind >= queue_.size()) {
-          if (combined_ind >= queue_.size()) {
-            std::cerr << "x " << x << ", y " << y
-                << ", queue_start_ " << queue_start_
-                << ", src_im_ind_raw " << src_im_ind_raw
-                << ", src_im_ind " << src_im_ind
-                << ", im_sz " << im_sz
+          if ((dst_ind >= queue_.size()) ||
+              (combined_ind >= queue_.size()))  {
+            std::cerr << "x " << x << ", y " << y << ", chan " << i
                 << ", pix_chan_ind " << pix_chan_ind
+                << ", queue_start_ " << queue_start_
+                << ", dst_ind " << dst_ind
                 << ", combined_ind " << combined_ind
                 << ", queue size " << queue_.size() << "\n";
             return;
           }
 #endif
+          queue_[dst_ind] = in[pix_chan_ind];
           dst_raw[pix_chan_ind] = queue_[combined_ind];
         }
       }
     }
     queue_start_++;
-    queue_start_ %= max_size_;
+    queue_start_ %= buffer_len_;
   }
 } delay_map_instance_t;
 
@@ -183,14 +186,14 @@ void f0r_get_param_info(f0r_param_info_t *info, int param_index) {
 }
 
 f0r_instance_t f0r_construct(unsigned int width, unsigned int height) {
-  LOG("construct");
+  DEBUG("construct");
   delay_map_instance_t *inst = new delay_map_instance(width, height);
   return (f0r_instance_t)inst;
 }
 
 void f0r_destruct(f0r_instance_t instance) {
   // TODO(lucasw) close the display?
-  LOG("destruct");
+  DEBUG("destruct");
   delay_map_instance_t *inst =
       reinterpret_cast<delay_map_instance_t *>(instance);
   delete inst;
@@ -200,7 +203,7 @@ void f0r_set_param_value(f0r_instance_t instance, f0r_param_t param,
                          int param_index) {
   assert(instance);
   delay_map_instance_t *inst = (delay_map_instance_t *)instance;
-  LOG(inst << " " << param << " " << param_index);
+  DEBUG(inst << " " << param << " " << param_index);
 
   switch (param_index) {
   case 0: {
@@ -224,7 +227,7 @@ void f0r_get_param_value(f0r_instance_t instance, f0r_param_t param,
                          int param_index) {
   assert(instance);
   delay_map_instance_t *inst = (delay_map_instance_t *)instance;
-  LOG(inst << " " << param << " " << param_index);
+  DEBUG(inst << " " << param << " " << param_index);
 
   switch (param_index) {
   case 0:
@@ -244,7 +247,7 @@ void f0r_update2(f0r_instance_t instance, double time, const uint32_t *inframe1,
                  uint32_t *outframe) {
   assert(instance);
   delay_map_instance_t *inst = (delay_map_instance_t *)instance;
-  LOG(inst << " " << inframe1 << " " << inframe2);
+  DEBUG(inst << " " << inframe1 << " " << inframe2);
   unsigned char *src = (unsigned char *)inframe1;
   unsigned char *map = (unsigned char *)inframe2;
   unsigned char *dst = (unsigned char *)outframe;
