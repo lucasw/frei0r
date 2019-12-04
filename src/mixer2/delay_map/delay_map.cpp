@@ -96,10 +96,11 @@ typedef struct delay_map_instance {
         const size_t pix_ind = y * width_ + x;
         for (size_t i = 0; i < 4; ++i) {
           const size_t pix_chan_ind = pix_ind * num_chan_ + i;
-          const size_t dst_ind = buffer_len_ * pix_chan_ind + queue_start_;
           // every pixel component color is buffer_size away from the next
           // one, so each is adjacent a version of itself from earlier
           // steps in time.
+          // const size_t dst_ind = buffer_len_ * pix_chan_ind + queue_start_;
+          const size_t dst_ind = queue_start_ * im_sz + pix_chan_ind;
           // TODO(lucasw) try interpolation with a float src_im_ind
           // black means the most recent image, white the earliest
           const int delay_raw = map_raw[pix_chan_ind];
@@ -108,7 +109,8 @@ typedef struct delay_map_instance {
               (scale_ * delay_raw / 255.0 + offset_));
           const int delay_pre = (static_cast<int>(queue_start_) + delay_offset);
           const int delay_ind =  (buffer_ssize + delay_pre) % buffer_ssize;
-          const size_t combined_ind = buffer_len_ * pix_chan_ind + delay_ind;
+          // const size_t combined_ind = buffer_len_ * pix_chan_ind + delay_ind;
+          const size_t combined_ind = delay_ind * im_sz + pix_chan_ind;
 
 #if 0
           if ((y == 0) && (x == 0) && (i == 0)) {
